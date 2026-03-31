@@ -1,0 +1,36 @@
+{
+  "name": "learn-claude-code-ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript port scaffold of shareAI-lab/learn-claude-code",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "s01": "tsx agents/s01-agent-loop.ts",
+    "s02": "tsx agents/s02-tool-use.ts",
+    "s03": "tsx agents/s03-todo-write.ts",
+    "s04": "tsx agents/s04-subagent.ts",
+    "s05": "tsx agents/s05-skill-loading.ts",
+    "s06": "tsx agents/s06-context-compact.ts",
+    "s07": "tsx agents/s07-task-system.ts",
+    "s08": "tsx agents/s08-background-tasks.ts",
+    "s09": "tsx agents/s09-agent-teams.ts",
+    "s10": "tsx agents/s10-team-protocols.ts",
+    "s11": "tsx agents/s11-autonomous-agents.ts",
+    "s12": "tsx agents/s12-worktree-task-isolation.ts",
+    "full": "tsx agents/s-full.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "dotenv": "^17.2.3",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

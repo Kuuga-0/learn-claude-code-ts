@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.vitest/
+.env
+.env.local
+.env.*.local
+.reference/
+.transcripts/
+.task_outputs/
+.tasks/
+.team/
+.worktrees/
