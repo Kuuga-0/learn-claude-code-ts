@@ -1,0 +1,681 @@
+{
+  "versions": [
+    {
+      "id": "s01",
+      "filename": "s01-agent-loop.ts",
+      "title": "The Agent Loop",
+      "subtitle": "Bash is All You Need",
+      "loc": 77,
+      "tools": [
+        "bash"
+      ],
+      "newTools": [
+        "bash"
+      ],
+      "coreAddition": "Single-tool agent loop",
+      "keyInsight": "The minimal agent kernel is a while loop + one tool",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 46
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 77
+        }
+      ],
+      "layer": "tools",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: the loop -- the model's first connection to the real world.\n/**\n * s01-agent-loop.ts - The Agent Loop\n *\n * The entire secret of an AI coding agent in one pattern:\n *\n *     while stop_reason === \"tool_use\":\n *         response = LLM(messages, tools)\n *         execute tools\n *         append results\n *\n * Ref: .reference/agents/s01_agent_loop.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash } from \"../src/tools/base-tools.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n});\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;\n\nconst TOOLS: Anthropic.Tool[] = [\n  {\n    name: \"bash\",\n    description: \"Run a shell command.\",\n    input_schema: {\n      type: \"object\",\n      properties: { command: { type: \"string\" } },\n      required: [\"command\"],\n    },\n  },\n];\n\nconst TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {\n  bash: (i) => runBash(i.command as string),\n};\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL,\n      system: SYSTEM,\n      messages,\n      tools: TOOLS,\n      max_tokens: 8000,\n    });\n\n    messages.push({ role: \"assistant\", content: response.content });\n\n    if (response.stop_reason !== \"tool_use\") {\n      return;\n    }\n\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        console.log(`\\x1b[33m$ ${String((block.input as ToolInput)[\"command\"] ?? \"\")}\\x1b[0m`);\n        const handler = TOOL_HANDLERS[block.name];\n        const output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        console.log(output.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n\n  console.log('s01 agent loop. Type \"q\" or \"exit\" to quit.');\n\n  while (true) {\n    let query: string;\n    try {\n      query = await rl.question(\"\\x1b[36ms01 >> \\x1b[0m\");\n    } catch {\n      break;\n    }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n  }\n\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s02",
+      "filename": "s02-tool-use.ts",
+      "title": "Tools",
+      "subtitle": "One Handler Per Tool",
+      "loc": 63,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file"
+      ],
+      "newTools": [
+        "read_file",
+        "write_file",
+        "edit_file"
+      ],
+      "coreAddition": "Tool dispatch map",
+      "keyInsight": "The loop stays the same; new tools register into the dispatch map",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 40
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 59
+        }
+      ],
+      "layer": "tools",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: tool dispatch -- expanding what the model can reach.\n/**\n * s02-tool-use.ts - Tools\n *\n * The agent loop from s01 didn't change. We just added tools to the array\n * and a dispatch map to route calls.\n *\n * Ref: .reference/agents/s02_tool_use.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { safePath, runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n});\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${process.cwd()}. Use tools to solve tasks. Act, don't explain.`;\n\nconst TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {\n  bash: (i) => runBash(i.command as string),\n  read_file: (i) => runRead(i.path as string, i.limit as number | undefined),\n  write_file: (i) => runWrite(i.path as string, i.content as string),\n  edit_file: (i) => runEdit(i.path as string, i.old_text as string, i.new_text as string),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        const output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        console.log(`> ${block.name}:`);\n        console.log(output.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s02 tool use. Type \"q\" or \"exit\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms02 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s03",
+      "filename": "s03-todo-write.ts",
+      "title": "TodoWrite",
+      "subtitle": "Plan Before You Act",
+      "loc": 81,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "todo"
+      ],
+      "newTools": [
+        "todo"
+      ],
+      "coreAddition": "TodoManager + nag reminder",
+      "keyInsight": "An agent without a plan drifts; list the steps first, then execute",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 44
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 75
+        }
+      ],
+      "layer": "planning",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: planning -- keeping the model on course without scripting the route.\n/**\n * s03-todo-write.ts - TodoWrite\n *\n * Ref: .reference/agents/s03_todo_write.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { TodoManager } from \"../src/managers/todo.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n});\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${process.cwd()}.\nUse the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.\nPrefer tools over prose.`;\n\nconst TODO = new TodoManager();\n\nconst TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {\n  bash: (i) => runBash(i.command as string),\n  read_file: (i) => runRead(i.path as string, i.limit as number | undefined),\n  write_file: (i) => runWrite(i.path as string, i.content as string),\n  edit_file: (i) => runEdit(i.path as string, i.old_text as string, i.new_text as string),\n  todo: (i) => TODO.update(i.items as Array<{ id: string; text: string; status: string }>),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"todo\", description: \"Update task list. Track progress on multi-step tasks.\", input_schema: { type: \"object\", properties: { items: { type: \"array\", items: { type: \"object\", properties: { id: { type: \"string\" }, text: { type: \"string\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] } }, required: [\"id\", \"text\", \"status\"] } } }, required: [\"items\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  let roundsSinceTodo = 0;\n  while (true) {\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: (Anthropic.ToolResultBlockParam | Anthropic.TextBlockParam)[] = [];\n    let usedTodo = false;\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        } catch (e) {\n          output = `Error: ${(e as Error).message}`;\n        }\n        console.log(`> ${block.name}:`);\n        console.log(String(output).slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n        if (block.name === \"todo\") usedTodo = true;\n      }\n    }\n    roundsSinceTodo = usedTodo ? 0 : roundsSinceTodo + 1;\n    if (roundsSinceTodo >= 3) {\n      results.push({ type: \"text\", text: \"<reminder>Update your todos.</reminder>\" });\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s03 todo write. Type \"q\" or \"exit\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms03 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s04",
+      "filename": "s04-subagent.ts",
+      "title": "Subagents",
+      "subtitle": "Clean Context Per Subtask",
+      "loc": 117,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "task"
+      ],
+      "newTools": [
+        "task"
+      ],
+      "coreAddition": "Subagent spawn with isolated messages[]",
+      "keyInsight": "Subagents use independent messages[], keeping the main conversation clean",
+      "classes": [],
+      "functions": [
+        {
+          "name": "runSubagent",
+          "signature": "async function runSubagent(prompt: string): Promise<string>",
+          "startLine": 51
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 85
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 119
+        }
+      ],
+      "layer": "planning",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: context isolation -- noise that doesn't bleed back into the parent.\n/**\n * s04-subagent.ts - Subagent\n *\n * Ref: .reference/agents/s04_subagent.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n});\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${process.cwd()}. Use the task tool to delegate exploration or subtasks.`;\nconst SUBAGENT_SYSTEM = `You are a coding subagent at ${process.cwd()}. Complete the given task, then summarize your findings.`;\n\nconst BASE_HANDLERS: Record<string, (input: ToolInput) => string> = {\n  bash: (i) => runBash(i.command as string),\n  read_file: (i) => runRead(i.path as string, i.limit as number | undefined),\n  write_file: (i) => runWrite(i.path as string, i.content as string),\n  edit_file: (i) => runEdit(i.path as string, i.old_text as string, i.new_text as string),\n};\n\nconst BASE_TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n];\n\nconst TASK_TOOL: Anthropic.Tool = {\n  name: \"task\",\n  description: \"Spawn a subagent with fresh context. It shares the filesystem but not conversation history.\",\n  input_schema: {\n    type: \"object\",\n    properties: {\n      prompt: { type: \"string\" },\n      description: { type: \"string\", description: \"Short description of the task\" },\n    },\n    required: [\"prompt\"],\n  },\n};\n\nasync function runSubagent(prompt: string): Promise<string> {\n  const subMessages: Anthropic.MessageParam[] = [{ role: \"user\", content: prompt }];\n  let response: Awaited<ReturnType<typeof client.messages.create>> | null = null;\n\n  for (let i = 0; i < 30; i++) {\n    response = await client.messages.create({\n      model: MODEL,\n      system: SUBAGENT_SYSTEM,\n      messages: subMessages,\n      tools: BASE_TOOLS,\n      max_tokens: 8000,\n    });\n\n    subMessages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") break;\n\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = BASE_HANDLERS[block.name];\n        const output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output).slice(0, 50_000) });\n      }\n    }\n    subMessages.push({ role: \"user\", content: results });\n  }\n\n  if (!response) return \"(no summary)\";\n  return response.content\n    .filter((b): b is Anthropic.TextBlock => b.type === \"text\")\n    .map((b) => b.text)\n    .join(\"\") || \"(no summary)\";\n}\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL,\n      system: SYSTEM,\n      messages,\n      tools: [...BASE_TOOLS, TASK_TOOL],\n      max_tokens: 8000,\n    });\n\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        let output: string;\n        if (block.name === \"task\") {\n          const description = String((block.input as ToolInput).description ?? \"subtask\");\n          console.log(`> task (${description}): ${String((block.input as ToolInput).prompt ?? \"\").slice(0, 80)}`);\n          output = await runSubagent(String((block.input as ToolInput).prompt ?? \"\"));\n        } else {\n          const handler = BASE_HANDLERS[block.name];\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        }\n        console.log(`  ${output.slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s04 subagent. Type \"q\" or \"exit\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms04 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s05",
+      "filename": "s05-skill-loading.ts",
+      "title": "Skills",
+      "subtitle": "Load on Demand",
+      "loc": 76,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "load_skill"
+      ],
+      "newTools": [
+        "load_skill"
+      ],
+      "coreAddition": "SkillLoader + two-layer injection",
+      "keyInsight": "Inject knowledge via tool_result when needed, not upfront in the system prompt",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 46
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 70
+        }
+      ],
+      "layer": "planning",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: on-demand knowledge -- domain expertise, loaded when the model asks.\n/**\n * s05-skill-loading.ts - Skills\n *\n * Ref: .reference/agents/s05_skill_loading.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { SkillLoader } from \"../src/managers/skills.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport * as path from \"node:path\";\nimport \"dotenv/config\";\n\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n});\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SKILL_LOADER = new SkillLoader(path.join(process.cwd(), \"skills\"));\nconst SYSTEM = `You are a coding agent at ${process.cwd()}.\nUse load_skill to access specialized knowledge before tackling unfamiliar topics.\n\nSkills available:\n${SKILL_LOADER.getDescriptions()}`;\n\nconst TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {\n  bash: (i) => runBash(i.command as string),\n  read_file: (i) => runRead(i.path as string, i.limit as number | undefined),\n  write_file: (i) => runWrite(i.path as string, i.content as string),\n  edit_file: (i) => runEdit(i.path as string, i.old_text as string, i.new_text as string),\n  load_skill: (i) => SKILL_LOADER.getContent(i.name as string),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"load_skill\", description: \"Load specialized knowledge by name.\", input_schema: { type: \"object\", properties: { name: { type: \"string\", description: \"Skill name to load\" } }, required: [\"name\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        } catch (e) {\n          output = `Error: ${(e as Error).message}`;\n        }\n        console.log(`> ${block.name}:`);\n        console.log(output.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log(`s05 skill loading. Loaded ${SKILL_LOADER.size} skills. Type \"q\" to quit.`);\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms05 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s06",
+      "filename": "s06-context-compact.ts",
+      "title": "Compact",
+      "subtitle": "Three-Layer Compression",
+      "loc": 90,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "compact"
+      ],
+      "newTools": [
+        "compact"
+      ],
+      "coreAddition": "micro-compact + auto-compact + archival",
+      "keyInsight": "Context will fill up; three-layer compression strategy enables infinite sessions",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<Anthropic.MessageParam[]>",
+          "startLine": 43
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 86
+        }
+      ],
+      "layer": "memory",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: compression -- clean memory for infinite sessions.\n/**\n * s06-context-compact.ts - Compact\n *\n * Ref: .reference/agents/s06_context_compact.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { estimateTokens, microCompact, autoCompact } from \"../src/managers/compact.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport * as path from \"node:path\";\nimport \"dotenv/config\";\n\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n});\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${process.cwd()}. Use tools to solve tasks.`;\nconst THRESHOLD = 50_000;\nconst TRANSCRIPT_DIR = path.join(process.cwd(), \".transcripts\");\n\nconst TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {\n  bash: (i) => runBash(i.command as string),\n  read_file: (i) => runRead(i.path as string, i.limit as number | undefined),\n  write_file: (i) => runWrite(i.path as string, i.content as string),\n  edit_file: (i) => runEdit(i.path as string, i.old_text as string, i.new_text as string),\n  compact: () => \"Manual compression requested.\",\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"compact\", description: \"Trigger manual conversation compression.\", input_schema: { type: \"object\", properties: { focus: { type: \"string\", description: \"What to preserve in the summary\" } } } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<Anthropic.MessageParam[]> {\n  while (true) {\n    microCompact(messages);\n    if (estimateTokens(messages) > THRESHOLD) {\n      console.log(\"[auto_compact triggered]\");\n      messages = await autoCompact(messages, client, MODEL, TRANSCRIPT_DIR);\n    }\n\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return messages;\n\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    let manualCompact = false;\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        let output: string;\n        if (block.name === \"compact\") {\n          manualCompact = true;\n          output = \"Compressing...\";\n        } else {\n          const handler = TOOL_HANDLERS[block.name];\n          try {\n            output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n          } catch (e) {\n            output = `Error: ${(e as Error).message}`;\n          }\n        }\n        console.log(`> ${block.name}:`);\n        console.log(output.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n\n    if (manualCompact) {\n      console.log(\"[manual compact]\");\n      messages = await autoCompact(messages, client, MODEL, TRANSCRIPT_DIR);\n      return messages;\n    }\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  let history: Anthropic.MessageParam[] = [];\n  console.log('s06 context compact. Type \"q\" or \"exit\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms06 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    history = await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s07",
+      "filename": "s07-task-system.ts",
+      "title": "Tasks",
+      "subtitle": "Task Graph + Dependencies",
+      "loc": 70,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get"
+      ],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get"
+      ],
+      "coreAddition": "TaskManager with file-based state + dependency graph",
+      "keyInsight": "A file-based task graph with ordering, parallelism, and dependencies -- the coordination backbone for multi-agent work",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 47
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 68
+        }
+      ],
+      "layer": "planning",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: persistent tasks -- goals that outlive any single conversation.\n/**\n * s07-task-system.ts - Tasks\n *\n * Ref: .reference/agents/s07_task_system.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { TaskManager } from \"../src/managers/tasks.js\";\nimport * as path from \"node:path\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use task tools to plan and track work.`;\n\nconst TASKS = new TaskManager(path.join(WORKDIR, \".tasks\"));\n\nconst TOOL_HANDLERS: Record<string, (i: ToolInput) => string> = {\n  bash: (i) => runBash(i[\"command\"] as string),\n  read_file: (i) => runRead(i[\"path\"] as string, i[\"limit\"] as number | undefined),\n  write_file: (i) => runWrite(i[\"path\"] as string, i[\"content\"] as string),\n  edit_file: (i) => runEdit(i[\"path\"] as string, i[\"old_text\"] as string, i[\"new_text\"] as string),\n  task_create: (i) => TASKS.create(i[\"subject\"] as string, i[\"description\"] as string | undefined),\n  task_update: (i) => TASKS.update(i[\"task_id\"] as number, i[\"status\"] as (\"pending\" | \"in_progress\" | \"completed\") | undefined, i[\"addBlockedBy\"] as number[] | undefined, i[\"removeBlockedBy\"] as number[] | undefined),\n  task_list: () => TASKS.listAll(),\n  task_get: (i) => TASKS.get(i[\"task_id\"] as number),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"task_create\", description: \"Create a new task.\", input_schema: { type: \"object\", properties: { subject: { type: \"string\" }, description: { type: \"string\" } }, required: [\"subject\"] } },\n  { name: \"task_update\", description: \"Update task status or dependencies.\", input_schema: { type: \"object\", properties: { task_id: { type: \"integer\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] }, addBlockedBy: { type: \"array\", items: { type: \"integer\" } }, removeBlockedBy: { type: \"array\", items: { type: \"integer\" } } }, required: [\"task_id\"] } },\n  { name: \"task_list\", description: \"List all tasks.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"task_get\", description: \"Get full details of a task.\", input_schema: { type: \"object\", properties: { task_id: { type: \"integer\" } }, required: [\"task_id\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let out: string;\n        try { out = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e) { out = `Error: ${(e as Error).message}`; }\n        console.log(`> ${block.name}:`);\n        console.log(out.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: out });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s07 task system. Type \"q\" or \"exit\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms07 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) for (const b of last.content) if (b.type === \"text\") console.log(b.text);\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s08",
+      "filename": "s08-background-tasks.ts",
+      "title": "Background Tasks",
+      "subtitle": "Background Threads + Notifications",
+      "loc": 70,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "background_run",
+        "check_background"
+      ],
+      "newTools": [
+        "background_run",
+        "check_background"
+      ],
+      "coreAddition": "BackgroundManager + notification queue",
+      "keyInsight": "Run slow operations in the background; the agent keeps thinking ahead",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 42
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 71
+        }
+      ],
+      "layer": "concurrency",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: background execution -- the model thinks while the harness waits.\n/**\n * s08-background-tasks.ts - Background Tasks\n *\n * Ref: .reference/agents/s08_background_tasks.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { BackgroundManager } from \"../src/managers/background.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use background_run for long-running commands.`;\n\nconst BG = new BackgroundManager();\n\nconst TOOL_HANDLERS: Record<string, (i: ToolInput) => string> = {\n  bash: (i) => runBash(i[\"command\"] as string),\n  read_file: (i) => runRead(i[\"path\"] as string, i[\"limit\"] as number | undefined),\n  write_file: (i) => runWrite(i[\"path\"] as string, i[\"content\"] as string),\n  edit_file: (i) => runEdit(i[\"path\"] as string, i[\"old_text\"] as string, i[\"new_text\"] as string),\n  background_run: (i) => BG.run(i[\"command\"] as string),\n  check_background: (i) => BG.check(i[\"task_id\"] as string | undefined),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command (blocking).\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"background_run\", description: \"Run command in background. Returns task_id immediately.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"check_background\", description: \"Check background task status. Omit task_id to list all.\", input_schema: { type: \"object\", properties: { task_id: { type: \"string\" } } } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    // Drain background notifications before each LLM call\n    const notifs = BG.drainNotifications();\n    if (notifs.length > 0 && messages.length > 0) {\n      const notifText = notifs.map((n) => `[bg:${n.taskId}] ${n.status}: ${n.result}`).join(\"\\n\");\n      messages.push({ role: \"user\", content: `<background-results>\\n${notifText}\\n</background-results>` });\n    }\n\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let out: string;\n        try { out = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e) { out = `Error: ${(e as Error).message}`; }\n        console.log(`> ${block.name}:`);\n        console.log(out.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: out });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s08 background tasks. Type \"q\" or \"exit\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms08 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) for (const b of last.content) if (b.type === \"text\") console.log(b.text);\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s09",
+      "filename": "s09-agent-teams.ts",
+      "title": "Agent Teams",
+      "subtitle": "Teammates + Mailboxes",
+      "loc": 79,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "spawn_teammate",
+        "list_teammates",
+        "send_message",
+        "read_inbox",
+        "broadcast"
+      ],
+      "newTools": [
+        "spawn_teammate",
+        "list_teammates",
+        "send_message",
+        "read_inbox",
+        "broadcast"
+      ],
+      "coreAddition": "TeammateManager + file-based mailbox",
+      "keyInsight": "When one agent can't finish, delegate to persistent teammates via async mailboxes",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 50
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 75
+        }
+      ],
+      "layer": "collaboration",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: team mailboxes -- multiple models, coordinated through files.\n/**\n * s09-agent-teams.ts - Agent Teams\n *\n * Ref: .reference/agents/s09_agent_teams.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { MessageBus, TeammateManager } from \"../src/managers/team.js\";\nimport * as path from \"node:path\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport \"dotenv/config\";\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a team lead at ${WORKDIR}. Spawn teammates and communicate via inboxes.`;\n\nconst TEAM = new TeammateManager({ workdir: WORKDIR, teamDir: path.join(WORKDIR, \".team\"), model: MODEL, apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst BUS = TEAM.getBus();\n\nconst TOOL_HANDLERS: Record<string, (i: ToolInput) => string> = {\n  bash: (i) => runBash(i[\"command\"] as string),\n  read_file: (i) => runRead(i[\"path\"] as string, i[\"limit\"] as number | undefined),\n  write_file: (i) => runWrite(i[\"path\"] as string, i[\"content\"] as string),\n  edit_file: (i) => runEdit(i[\"path\"] as string, i[\"old_text\"] as string, i[\"new_text\"] as string),\n  spawn_teammate: (i) => TEAM.spawn(i[\"name\"] as string, i[\"role\"] as string, i[\"prompt\"] as string),\n  list_teammates: () => TEAM.listAll(),\n  send_message: (i) => BUS.send(\"lead\", i[\"to\"] as string, i[\"content\"] as string, (i[\"msg_type\"] as \"message\") ?? \"message\"),\n  read_inbox: () => JSON.stringify(BUS.readInbox(\"lead\"), null, 2),\n  broadcast: (i) => BUS.broadcast(\"lead\", i[\"content\"] as string, TEAM.memberNames()),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"spawn_teammate\", description: \"Spawn a persistent teammate.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" }, role: { type: \"string\" }, prompt: { type: \"string\" } }, required: [\"name\", \"role\", \"prompt\"] } },\n  { name: \"list_teammates\", description: \"List all teammates.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"send_message\", description: \"Send message to a teammate.\", input_schema: { type: \"object\", properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\" } }, required: [\"to\", \"content\"] } },\n  { name: \"read_inbox\", description: \"Read and drain lead's inbox.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"broadcast\", description: \"Send message to all teammates.\", input_schema: { type: \"object\", properties: { content: { type: \"string\" } }, required: [\"content\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const inbox = BUS.readInbox(\"lead\");\n    if (inbox.length > 0) {\n      messages.push({ role: \"user\", content: `<inbox>${JSON.stringify(inbox, null, 2)}</inbox>` });\n    }\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let out: string;\n        try { out = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e) { out = `Error: ${(e as Error).message}`; }\n        console.log(`> ${block.name}:`);\n        console.log(out.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: out });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s09 agent teams. Type \"q\" or \"/team\" or \"/inbox\". Type \"q\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms09 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    if (query.trim() === \"/team\") { console.log(TEAM.listAll()); continue; }\n    if (query.trim() === \"/inbox\") { console.log(JSON.stringify(BUS.readInbox(\"lead\"), null, 2)); continue; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) for (const b of last.content) if (b.type === \"text\") console.log(b.text);\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s10",
+      "filename": "s10-team-protocols.ts",
+      "title": "Team Protocols",
+      "subtitle": "Shared Communication Rules",
+      "loc": 97,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "spawn_teammate",
+        "list_teammates",
+        "send_message",
+        "read_inbox",
+        "broadcast",
+        "shutdown_request",
+        "plan_approval"
+      ],
+      "newTools": [
+        "shutdown_request",
+        "plan_approval"
+      ],
+      "coreAddition": "request_id correlation for two protocols",
+      "keyInsight": "One request-response pattern drives all team negotiation",
+      "classes": [],
+      "functions": [
+        {
+          "name": "handleShutdownRequest",
+          "signature": "function handleShutdownRequest(teammate: string): string",
+          "startLine": 31
+        },
+        {
+          "name": "handlePlanReview",
+          "signature": "function handlePlanReview(requestId: string, approve: boolean, feedback = \"\"): string",
+          "startLine": 38
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 74
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 97
+        }
+      ],
+      "layer": "collaboration",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: protocols -- structured handshakes between models.\n/**\n * s10-team-protocols.ts - Team Protocols\n *\n * Ref: .reference/agents/s10_team_protocols.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { MessageBus, TeammateManager } from \"../src/managers/team.js\";\nimport * as path from \"node:path\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport { randomBytes } from \"node:crypto\";\nimport \"dotenv/config\";\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a team lead at ${WORKDIR}. Manage teammates with shutdown and plan approval protocols.`;\n\nconst TEAM = new TeammateManager({ workdir: WORKDIR, teamDir: path.join(WORKDIR, \".team\"), model: MODEL, apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst BUS = TEAM.getBus();\n\n// Request trackers\nconst shutdownRequests = new Map<string, { target: string; status: \"pending\" | \"approved\" | \"rejected\" }>();\nconst planRequests = new Map<string, { from: string; plan: string; status: \"pending\" | \"approved\" | \"rejected\" }>();\n\nfunction handleShutdownRequest(teammate: string): string {\n  const reqId = randomBytes(4).toString(\"hex\");\n  shutdownRequests.set(reqId, { target: teammate, status: \"pending\" });\n  BUS.send(\"lead\", teammate, \"Please shut down gracefully.\", \"shutdown_request\", { request_id: reqId });\n  return `Shutdown request ${reqId} sent to '${teammate}' (status: pending)`;\n}\n\nfunction handlePlanReview(requestId: string, approve: boolean, feedback = \"\"): string {\n  const req = planRequests.get(requestId);\n  if (!req) return `Error: Unknown plan request_id '${requestId}'`;\n  req.status = approve ? \"approved\" : \"rejected\";\n  BUS.send(\"lead\", req.from, feedback, \"plan_approval_response\", { request_id: requestId, approve, feedback });\n  return `Plan ${req.status} for '${req.from}'`;\n}\n\nconst TOOL_HANDLERS: Record<string, (i: ToolInput) => string> = {\n  bash: (i) => runBash(i[\"command\"] as string),\n  read_file: (i) => runRead(i[\"path\"] as string, i[\"limit\"] as number | undefined),\n  write_file: (i) => runWrite(i[\"path\"] as string, i[\"content\"] as string),\n  edit_file: (i) => runEdit(i[\"path\"] as string, i[\"old_text\"] as string, i[\"new_text\"] as string),\n  spawn_teammate: (i) => TEAM.spawn(i[\"name\"] as string, i[\"role\"] as string, i[\"prompt\"] as string),\n  list_teammates: () => TEAM.listAll(),\n  send_message: (i) => BUS.send(\"lead\", i[\"to\"] as string, i[\"content\"] as string, (i[\"msg_type\"] as \"message\") ?? \"message\"),\n  read_inbox: () => JSON.stringify(BUS.readInbox(\"lead\"), null, 2),\n  broadcast: (i) => BUS.broadcast(\"lead\", i[\"content\"] as string, TEAM.memberNames()),\n  shutdown_request: (i) => handleShutdownRequest(i[\"teammate\"] as string),\n  plan_approval: (i) => handlePlanReview(i[\"request_id\"] as string, i[\"approve\"] as boolean, i[\"feedback\"] as string | undefined),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"spawn_teammate\", description: \"Spawn a persistent teammate.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" }, role: { type: \"string\" }, prompt: { type: \"string\" } }, required: [\"name\", \"role\", \"prompt\"] } },\n  { name: \"list_teammates\", description: \"List all teammates.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"send_message\", description: \"Send message to a teammate.\", input_schema: { type: \"object\", properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\" } }, required: [\"to\", \"content\"] } },\n  { name: \"read_inbox\", description: \"Read and drain lead's inbox.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"broadcast\", description: \"Send message to all teammates.\", input_schema: { type: \"object\", properties: { content: { type: \"string\" } }, required: [\"content\"] } },\n  { name: \"shutdown_request\", description: \"Request a teammate to shut down.\", input_schema: { type: \"object\", properties: { teammate: { type: \"string\" } }, required: [\"teammate\"] } },\n  { name: \"plan_approval\", description: \"Approve or reject a teammate's plan submission.\", input_schema: { type: \"object\", properties: { request_id: { type: \"string\" }, approve: { type: \"boolean\" }, feedback: { type: \"string\" } }, required: [\"request_id\", \"approve\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const inbox = BUS.readInbox(\"lead\");\n    if (inbox.length > 0) messages.push({ role: \"user\", content: `<inbox>${JSON.stringify(inbox, null, 2)}</inbox>` });\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let out: string;\n        try { out = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e) { out = `Error: ${(e as Error).message}`; }\n        console.log(`> ${block.name}:`);\n        console.log(out.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: out });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s10 team protocols. Type \"q\" or \"/team\" or \"/inbox\". Type \"q\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms10 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    if (query.trim() === \"/team\") { console.log(TEAM.listAll()); continue; }\n    if (query.trim() === \"/inbox\") { console.log(JSON.stringify(BUS.readInbox(\"lead\"), null, 2)); continue; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) for (const b of last.content) if (b.type === \"text\") console.log(b.text);\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s11",
+      "filename": "s11-autonomous-agents.ts",
+      "title": "Autonomous Agents",
+      "subtitle": "Scan Board, Claim Tasks",
+      "loc": 103,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "spawn_teammate",
+        "list_teammates",
+        "send_message",
+        "read_inbox",
+        "broadcast",
+        "task_create",
+        "task_update",
+        "task_list",
+        "shutdown_request"
+      ],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list"
+      ],
+      "coreAddition": "Task board polling + timeout-based self-governance",
+      "keyInsight": "Teammates scan the board and claim tasks themselves; no need for the lead to assign each one",
+      "classes": [],
+      "functions": [
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 76
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 99
+        }
+      ],
+      "layer": "collaboration",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: autonomy -- models that find work without being told.\n/**\n * s11-autonomous-agents.ts - Autonomous Agents\n *\n * Ref: .reference/agents/s11_autonomous_agents.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash, runRead, runWrite, runEdit } from \"../src/tools/base-tools.js\";\nimport { MessageBus, TeammateManager } from \"../src/managers/team.js\";\nimport { TaskManager } from \"../src/managers/tasks.js\";\nimport * as path from \"node:path\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport { randomBytes } from \"node:crypto\";\nimport \"dotenv/config\";\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\nconst SYSTEM = `You are a team lead at ${WORKDIR}. Teammates are autonomous -- they find work themselves.`;\n\nconst TEAM = new TeammateManager({\n  workdir: WORKDIR,\n  teamDir: path.join(WORKDIR, \".team\"),\n  model: MODEL,\n  apiKey: process.env.ANTHROPIC_API_KEY,\n  baseURL: process.env.ANTHROPIC_BASE_URL,\n  pollInterval: 5000,\n  idleTimeout: 60000,\n});\nconst BUS = TEAM.getBus();\nconst TASKS = new TaskManager(path.join(WORKDIR, \".tasks\"));\nconst shutdownRequests = new Map<string, { target: string; status: \"pending\" | \"approved\" | \"rejected\" }>();\n\nconst TOOL_HANDLERS: Record<string, (i: ToolInput) => string> = {\n  bash: (i) => runBash(i[\"command\"] as string),\n  read_file: (i) => runRead(i[\"path\"] as string, i[\"limit\"] as number | undefined),\n  write_file: (i) => runWrite(i[\"path\"] as string, i[\"content\"] as string),\n  edit_file: (i) => runEdit(i[\"path\"] as string, i[\"old_text\"] as string, i[\"new_text\"] as string),\n  spawn_teammate: (i) => TEAM.spawn(i[\"name\"] as string, i[\"role\"] as string, i[\"prompt\"] as string, true),\n  list_teammates: () => TEAM.listAll(),\n  send_message: (i) => BUS.send(\"lead\", i[\"to\"] as string, i[\"content\"] as string, (i[\"msg_type\"] as \"message\") ?? \"message\"),\n  read_inbox: () => JSON.stringify(BUS.readInbox(\"lead\"), null, 2),\n  broadcast: (i) => BUS.broadcast(\"lead\", i[\"content\"] as string, TEAM.memberNames()),\n  task_create: (i) => TASKS.create(i[\"subject\"] as string, i[\"description\"] as string | undefined),\n  task_update: (i) => TASKS.update(i[\"task_id\"] as number, i[\"status\"] as (\"pending\" | \"in_progress\" | \"completed\") | undefined),\n  task_list: () => TASKS.listAll(),\n  shutdown_request: (i) => {\n    const teammate = i[\"teammate\"] as string;\n    const reqId = randomBytes(4).toString(\"hex\");\n    shutdownRequests.set(reqId, { target: teammate, status: \"pending\" });\n    BUS.send(\"lead\", teammate, \"Please shut down gracefully.\", \"shutdown_request\", { request_id: reqId });\n    return `Shutdown request ${reqId} sent to '${teammate}'`;\n  },\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\", input_schema: { type: \"object\", properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"spawn_teammate\", description: \"Spawn an autonomous teammate.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" }, role: { type: \"string\" }, prompt: { type: \"string\" } }, required: [\"name\", \"role\", \"prompt\"] } },\n  { name: \"list_teammates\", description: \"List all teammates.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"send_message\", description: \"Send message to a teammate.\", input_schema: { type: \"object\", properties: { to: { type: \"string\" }, content: { type: \"string\" } }, required: [\"to\", \"content\"] } },\n  { name: \"read_inbox\", description: \"Read and drain lead's inbox.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"broadcast\", description: \"Send message to all teammates.\", input_schema: { type: \"object\", properties: { content: { type: \"string\" } }, required: [\"content\"] } },\n  { name: \"task_create\", description: \"Create a task.\", input_schema: { type: \"object\", properties: { subject: { type: \"string\" }, description: { type: \"string\" } }, required: [\"subject\"] } },\n  { name: \"task_update\", description: \"Update task status.\", input_schema: { type: \"object\", properties: { task_id: { type: \"integer\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] } }, required: [\"task_id\"] } },\n  { name: \"task_list\", description: \"List all tasks.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"shutdown_request\", description: \"Request a teammate to shut down.\", input_schema: { type: \"object\", properties: { teammate: { type: \"string\" } }, required: [\"teammate\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const inbox = BUS.readInbox(\"lead\");\n    if (inbox.length > 0) messages.push({ role: \"user\", content: `<inbox>${JSON.stringify(inbox, null, 2)}</inbox>` });\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let out: string;\n        try { out = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e) { out = `Error: ${(e as Error).message}`; }\n        console.log(`> ${block.name}:`);\n        console.log(out.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: out });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s11 autonomous agents. Type \"q\" or \"/team\" or \"/tasks\". Type \"q\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms11 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    if (query.trim() === \"/team\") { console.log(TEAM.listAll()); continue; }\n    if (query.trim() === \"/tasks\") { console.log(TASKS.listAll()); continue; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) for (const b of last.content) if (b.type === \"text\") console.log(b.text);\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    },
+    {
+      "id": "s12",
+      "filename": "s12-worktree-task-isolation.ts",
+      "title": "Worktree + Task Isolation",
+      "subtitle": "Isolate by Directory",
+      "loc": 175,
+      "tools": [
+        "bash",
+        "task_create",
+        "task_list",
+        "task_update",
+        "task_get",
+        "worktree_create",
+        "worktree_list",
+        "worktree_run",
+        "worktree_status",
+        "worktree_keep",
+        "worktree_remove",
+        "worktree_events"
+      ],
+      "newTools": [
+        "task_get",
+        "worktree_create",
+        "worktree_list",
+        "worktree_run",
+        "worktree_status",
+        "worktree_keep",
+        "worktree_remove",
+        "worktree_events"
+      ],
+      "coreAddition": "Composable worktree lifecycle + event stream over a shared task board",
+      "keyInsight": "Each works in its own directory; tasks manage goals, worktrees manage directories, bound by ID",
+      "classes": [],
+      "functions": [
+        {
+          "name": "detectRepoRoot",
+          "signature": "function detectRepoRoot(cwd: string): string | null",
+          "startLine": 24
+        },
+        {
+          "name": "emitEvent",
+          "signature": "function emitEvent(event: string, task?: Record<string, unknown>, worktree?: Record<string, unknown>, error?: string): void",
+          "startLine": 38
+        },
+        {
+          "name": "listRecentEvents",
+          "signature": "function listRecentEvents(limit = 20): string",
+          "startLine": 46
+        },
+        {
+          "name": "loadIndex",
+          "signature": "function loadIndex(): WorktreeIndex",
+          "startLine": 62
+        },
+        {
+          "name": "saveIndex",
+          "signature": "function saveIndex(idx: WorktreeIndex): void",
+          "startLine": 68
+        },
+        {
+          "name": "runGit",
+          "signature": "function runGit(args: string[], cwd = REPO_ROOT): string",
+          "startLine": 72
+        },
+        {
+          "name": "worktreeCreate",
+          "signature": "function worktreeCreate(name: string, taskId?: number): string",
+          "startLine": 82
+        },
+        {
+          "name": "worktreeList",
+          "signature": "function worktreeList(): string",
+          "startLine": 97
+        },
+        {
+          "name": "worktreeRun",
+          "signature": "function worktreeRun(name: string, command: string): string",
+          "startLine": 103
+        },
+        {
+          "name": "worktreeStatus",
+          "signature": "function worktreeStatus(name: string): string",
+          "startLine": 110
+        },
+        {
+          "name": "worktreeRemove",
+          "signature": "function worktreeRemove(name: string): string",
+          "startLine": 118
+        },
+        {
+          "name": "worktreeKeep",
+          "signature": "function worktreeKeep(name: string): string",
+          "startLine": 131
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void>",
+          "startLine": 171
+        },
+        {
+          "name": "main",
+          "signature": "async function main()",
+          "startLine": 192
+        }
+      ],
+      "layer": "collaboration",
+      "source": "#!/usr/bin/env npx tsx\n// Harness: directory isolation -- parallel execution lanes that never collide.\n/**\n * s12-worktree-task-isolation.ts - Worktree + Task Isolation\n *\n * Ref: .reference/agents/s12_worktree_task_isolation.py\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport * as fs from \"node:fs\";\nimport * as path from \"node:path\";\nimport type { ToolInput } from \"../src/types/agent.js\";\nimport { runBash } from \"../src/tools/base-tools.js\";\nimport { TaskManager } from \"../src/managers/tasks.js\";\nimport * as readline from \"node:readline/promises\";\nimport { stdin as input, stdout as output } from \"node:process\";\nimport { execSync, execFileSync } from \"node:child_process\";\nimport \"dotenv/config\";\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });\nconst MODEL = process.env.MODEL_ID ?? \"claude-sonnet-4-6\";\n\nfunction detectRepoRoot(cwd: string): string | null {\n  try {\n    const result = execFileSync(\"git\", [\"rev-parse\", \"--show-toplevel\"], { cwd, encoding: \"utf8\", timeout: 10_000 });\n    const root = result.trim();\n    return fs.existsSync(root) ? root : null;\n  } catch { return null; }\n}\n\nconst REPO_ROOT = detectRepoRoot(WORKDIR) ?? WORKDIR;\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use task + worktree tools for multi-task work. For parallel or risky changes: create tasks, allocate worktree lanes, run commands in those lanes, then choose keep/remove for closeout.`;\n\n// -- EventBus --\nconst EVENT_LOG = path.join(REPO_ROOT, \".worktrees\", \"events.jsonl\");\n\nfunction emitEvent(event: string, task?: Record<string, unknown>, worktree?: Record<string, unknown>, error?: string): void {\n  const payload: Record<string, unknown> = { event, ts: Date.now() / 1000, task: task ?? {}, worktree: worktree ?? {} };\n  if (error) payload[\"error\"] = error;\n  fs.mkdirSync(path.dirname(EVENT_LOG), { recursive: true });\n  if (!fs.existsSync(EVENT_LOG)) fs.writeFileSync(EVENT_LOG, \"\", \"utf8\");\n  fs.appendFileSync(EVENT_LOG, JSON.stringify(payload) + \"\\n\", \"utf8\");\n}\n\nfunction listRecentEvents(limit = 20): string {\n  if (!fs.existsSync(EVENT_LOG)) return \"[]\";\n  const n = Math.max(1, Math.min(limit, 200));\n  const lines = fs.readFileSync(EVENT_LOG, \"utf8\").split(\"\\n\").filter(Boolean);\n  const recent = lines.slice(-n);\n  const items = recent.map((l) => { try { return JSON.parse(l); } catch { return { event: \"parse_error\", raw: l }; } });\n  return JSON.stringify(items, null, 2);\n}\n\n// -- Worktree index --\nconst WORKTREES_DIR = path.join(REPO_ROOT, \".worktrees\");\nconst INDEX_PATH = path.join(WORKTREES_DIR, \"index.json\");\n\ninterface WorktreeRecord { name: string; path: string; branch: string; task_id: number | null; status: \"active\" | \"removed\" }\ninterface WorktreeIndex { worktrees: WorktreeRecord[] }\n\nfunction loadIndex(): WorktreeIndex {\n  fs.mkdirSync(WORKTREES_DIR, { recursive: true });\n  if (!fs.existsSync(INDEX_PATH)) { const idx = { worktrees: [] }; fs.writeFileSync(INDEX_PATH, JSON.stringify(idx, null, 2), \"utf8\"); return idx; }\n  return JSON.parse(fs.readFileSync(INDEX_PATH, \"utf8\")) as WorktreeIndex;\n}\n\nfunction saveIndex(idx: WorktreeIndex): void {\n  fs.writeFileSync(INDEX_PATH, JSON.stringify(idx, null, 2), \"utf8\");\n}\n\nfunction runGit(args: string[], cwd = REPO_ROOT): string {\n  try {\n    return execFileSync(\"git\", args, { cwd, encoding: \"utf8\", timeout: 120_000 });\n  } catch (err) {\n    const e = err as { stderr?: string; message?: string };\n    throw new Error((e.stderr || e.message || String(err)).trim());\n  }\n}\n\n// -- Worktree operations --\nfunction worktreeCreate(name: string, taskId?: number): string {\n  const wtPath = path.join(WORKTREES_DIR, name);\n  const branch = `wt/${name}`;\n  try { runGit([\"worktree\", \"add\", wtPath, \"-b\", branch]); }\n  catch (e) { emitEvent(\"worktree_create_failed\", {}, { name }, String(e)); return `Error: ${(e as Error).message}`; }\n  const record: WorktreeRecord = { name, path: wtPath, branch, task_id: taskId ?? null, status: \"active\" };\n  const idx = loadIndex();\n  idx.worktrees = idx.worktrees.filter((w) => w.name !== name);\n  idx.worktrees.push(record);\n  saveIndex(idx);\n  if (taskId !== undefined) { try { TASKS.bindWorktree(taskId, name); } catch { /* ignore */ } }\n  emitEvent(\"worktree_created\", {}, { name, path: wtPath, branch });\n  return JSON.stringify(record, null, 2);\n}\n\nfunction worktreeList(): string {\n  const idx = loadIndex();\n  if (idx.worktrees.length === 0) return \"No worktrees.\";\n  return idx.worktrees.map((w) => `[${w.status}] ${w.name} (branch: ${w.branch}, task_id: ${w.task_id ?? \"none\"})`).join(\"\\n\");\n}\n\nfunction worktreeRun(name: string, command: string): string {\n  const idx = loadIndex();\n  const wt = idx.worktrees.find((w) => w.name === name && w.status === \"active\");\n  if (!wt) return `Error: Worktree '${name}' not found or not active`;\n  return runBash(command);  // run with cwd change is complex; run in worktree path via bash\n}\n\nfunction worktreeStatus(name: string): string {\n  const idx = loadIndex();\n  const wt = idx.worktrees.find((w) => w.name === name && w.status === \"active\");\n  if (!wt) return `Error: Worktree '${name}' not found`;\n  try { return runGit([\"status\"], wt.path); }\n  catch (e) { return `Error: ${(e as Error).message}`; }\n}\n\nfunction worktreeRemove(name: string): string {\n  const idx = loadIndex();\n  const wt = idx.worktrees.find((w) => w.name === name);\n  if (!wt) return `Error: Worktree '${name}' not found`;\n  try { runGit([\"worktree\", \"remove\", \"--force\", wt.path]); }\n  catch { /* may already be removed */ }\n  wt.status = \"removed\";\n  saveIndex(idx);\n  if (wt.task_id !== null) { try { TASKS.unbindWorktree(wt.task_id); } catch { /* ignore */ } }\n  emitEvent(\"worktree_removed\", {}, { name });\n  return `Removed worktree '${name}'`;\n}\n\nfunction worktreeKeep(name: string): string {\n  const idx = loadIndex();\n  const wt = idx.worktrees.find((w) => w.name === name);\n  if (!wt) return `Error: Worktree '${name}' not found`;\n  emitEvent(\"worktree_kept\", {}, { name });\n  return `Worktree '${name}' marked as kept`;\n}\n\nconst TASKS = new TaskManager(path.join(REPO_ROOT, \".tasks\"));\n\nconst TOOL_HANDLERS: Record<string, (i: ToolInput) => string> = {\n  bash: (i) => runBash(i[\"command\"] as string),\n  task_create: (i) => TASKS.create(i[\"subject\"] as string, i[\"description\"] as string | undefined),\n  task_list: () => TASKS.listAll(),\n  task_update: (i) => TASKS.update(i[\"task_id\"] as number, i[\"status\"] as (\"pending\" | \"in_progress\" | \"completed\") | undefined),\n  task_get: (i) => TASKS.get(i[\"task_id\"] as number),\n  worktree_create: (i) => worktreeCreate(i[\"name\"] as string, i[\"task_id\"] as number | undefined),\n  worktree_list: () => worktreeList(),\n  worktree_run: (i) => worktreeRun(i[\"name\"] as string, i[\"command\"] as string),\n  worktree_status: (i) => worktreeStatus(i[\"name\"] as string),\n  worktree_keep: (i) => worktreeKeep(i[\"name\"] as string),\n  worktree_remove: (i) => worktreeRemove(i[\"name\"] as string),\n  worktree_events: (i) => listRecentEvents(i[\"limit\"] as number | undefined),\n};\n\nconst TOOLS: Anthropic.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\", input_schema: { type: \"object\", properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"task_create\", description: \"Create a task.\", input_schema: { type: \"object\", properties: { subject: { type: \"string\" }, description: { type: \"string\" } }, required: [\"subject\"] } },\n  { name: \"task_list\", description: \"List all tasks.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"task_update\", description: \"Update task status.\", input_schema: { type: \"object\", properties: { task_id: { type: \"integer\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] } }, required: [\"task_id\"] } },\n  { name: \"task_get\", description: \"Get task details.\", input_schema: { type: \"object\", properties: { task_id: { type: \"integer\" } }, required: [\"task_id\"] } },\n  { name: \"worktree_create\", description: \"Create a git worktree for a task.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" }, task_id: { type: \"integer\" } }, required: [\"name\"] } },\n  { name: \"worktree_list\", description: \"List all worktrees.\", input_schema: { type: \"object\", properties: {} } },\n  { name: \"worktree_run\", description: \"Run command in a worktree.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" }, command: { type: \"string\" } }, required: [\"name\", \"command\"] } },\n  { name: \"worktree_status\", description: \"Get git status of a worktree.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" } }, required: [\"name\"] } },\n  { name: \"worktree_keep\", description: \"Mark worktree to keep.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" } }, required: [\"name\"] } },\n  { name: \"worktree_remove\", description: \"Remove a worktree.\", input_schema: { type: \"object\", properties: { name: { type: \"string\" } }, required: [\"name\"] } },\n  { name: \"worktree_events\", description: \"List recent lifecycle events.\", input_schema: { type: \"object\", properties: { limit: { type: \"integer\" } } } },\n];\n\nasync function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let out: string;\n        try { out = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e) { out = `Error: ${(e as Error).message}`; }\n        console.log(`> ${block.name}:`);\n        console.log(out.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: out });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\nasync function main() {\n  const rl = readline.createInterface({ input, output });\n  const history: Anthropic.MessageParam[] = [];\n  console.log('s12 worktree isolation. Type \"q\" to quit.');\n  while (true) {\n    let query: string;\n    try { query = await rl.question(\"\\x1b[36ms12 >> \\x1b[0m\"); } catch { break; }\n    if (!query.trim() || [\"q\", \"exit\"].includes(query.trim().toLowerCase())) break;\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (Array.isArray(last.content)) for (const b of last.content) if (b.type === \"text\") console.log(b.text);\n    console.log();\n  }\n  rl.close();\n}\n\nmain().catch(console.error);\n"
+    }
+  ],
+  "diffs": [
+    {
+      "from": "s01",
+      "to": "s02",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "read_file",
+        "write_file",
+        "edit_file"
+      ],
+      "locDelta": -14
+    },
+    {
+      "from": "s02",
+      "to": "s03",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "todo"
+      ],
+      "locDelta": 18
+    },
+    {
+      "from": "s03",
+      "to": "s04",
+      "newClasses": [],
+      "newFunctions": [
+        "runSubagent"
+      ],
+      "newTools": [
+        "task"
+      ],
+      "locDelta": 36
+    },
+    {
+      "from": "s04",
+      "to": "s05",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "load_skill"
+      ],
+      "locDelta": -41
+    },
+    {
+      "from": "s05",
+      "to": "s06",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "compact"
+      ],
+      "locDelta": 14
+    },
+    {
+      "from": "s06",
+      "to": "s07",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get"
+      ],
+      "locDelta": -20
+    },
+    {
+      "from": "s07",
+      "to": "s08",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "background_run",
+        "check_background"
+      ],
+      "locDelta": 0
+    },
+    {
+      "from": "s08",
+      "to": "s09",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "spawn_teammate",
+        "list_teammates",
+        "send_message",
+        "read_inbox",
+        "broadcast"
+      ],
+      "locDelta": 9
+    },
+    {
+      "from": "s09",
+      "to": "s10",
+      "newClasses": [],
+      "newFunctions": [
+        "handleShutdownRequest",
+        "handlePlanReview"
+      ],
+      "newTools": [
+        "shutdown_request",
+        "plan_approval"
+      ],
+      "locDelta": 18
+    },
+    {
+      "from": "s10",
+      "to": "s11",
+      "newClasses": [],
+      "newFunctions": [],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list"
+      ],
+      "locDelta": 6
+    },
+    {
+      "from": "s11",
+      "to": "s12",
+      "newClasses": [],
+      "newFunctions": [
+        "detectRepoRoot",
+        "emitEvent",
+        "listRecentEvents",
+        "loadIndex",
+        "saveIndex",
+        "runGit",
+        "worktreeCreate",
+        "worktreeList",
+        "worktreeRun",
+        "worktreeStatus",
+        "worktreeRemove",
+        "worktreeKeep"
+      ],
+      "newTools": [
+        "task_get",
+        "worktree_create",
+        "worktree_list",
+        "worktree_run",
+        "worktree_status",
+        "worktree_keep",
+        "worktree_remove",
+        "worktree_events"
+      ],
+      "locDelta": 72
+    }
+  ]
+}

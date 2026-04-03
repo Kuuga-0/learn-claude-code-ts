@@ -10,20 +10,12 @@
  *         execute tools
  *         append results
  *
- *     +----------+      +-------+      +---------+
- *     |   User   | ---> |  LLM  | ---> |  Tool   |
- *     |  prompt  |      |       |      | execute |
- *     +----------+      +---+---+      +----+----+
- *                           ^               |
- *                           |   tool_result |
- *                           +---------------+
- *                           (loop continues)
- *
  * Ref: .reference/agents/s01_agent_loop.py
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { execSync } from "node:child_process";
+import type { ToolInput } from "../src/types/agent.js";
+import { runBash } from "../src/tools/base-tools.js";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import "dotenv/config";
@@ -47,24 +39,41 @@ const TOOLS: Anthropic.Tool[] = [
   },
 ];
 
-// -- Tool implementation --
-function runBash(command: string): string {
-  // TODO: 实现危险命令检测和子进程执行
-  throw new Error("TODO: implement runBash");
-}
+const TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {
+  bash: (i) => runBash(i.command as string),
+};
 
-// -- The core pattern: a while loop that calls tools until the model stops --
 async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
-  // TODO: 实现 agent 循环
-  // 1. 调用 client.messages.create(...)
-  // 2. 将 assistant 响应追加到 messages
-  // 3. 如果 stop_reason !== "tool_use"，返回
-  // 4. 执行工具调用，收集 tool_result
-  // 5. 将 tool_result 追加到 messages，继续循环
-  throw new Error("TODO: implement agentLoop");
+  while (true) {
+    const response = await client.messages.create({
+      model: MODEL,
+      system: SYSTEM,
+      messages,
+      tools: TOOLS,
+      max_tokens: 8000,
+    });
+
+    messages.push({ role: "assistant", content: response.content });
+
+    if (response.stop_reason !== "tool_use") {
+      return;
+    }
+
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        console.log(`\x1b[33m$ ${String((block.input as ToolInput)["command"] ?? "")}\x1b[0m`);
+        const handler = TOOL_HANDLERS[block.name];
+        const output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;
+        console.log(output.slice(0, 200));
+        results.push({ type: "tool_result", tool_use_id: block.id, content: output });
+      }
+    }
+
+    messages.push({ role: "user", content: results });
+  }
 }
 
-// -- REPL --
 async function main() {
   const rl = readline.createInterface({ input, output });
   const history: Anthropic.MessageParam[] = [];
@@ -78,9 +87,7 @@ async function main() {
     } catch {
       break;
     }
-    if (!query.trim() || ["q", "exit"].includes(query.trim().toLowerCase())) {
-      break;
-    }
+    if (!query.trim() || ["q", "exit"].includes(query.trim().toLowerCase())) break;
     history.push({ role: "user", content: query });
     await agentLoop(history);
     const last = history[history.length - 1];

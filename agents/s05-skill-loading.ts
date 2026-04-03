@@ -1,167 +1,82 @@
 #!/usr/bin/env npx tsx
-// Harness: skill loading -- domain knowledge loaded on demand, not upfront.
+// Harness: on-demand knowledge -- domain expertise, loaded when the model asks.
 /**
- * s05-skill-loading.ts - Skill Loading
- *
- * Scans skills/{*}/SKILL.md, parses YAML frontmatter, injects metadata into
- * the system prompt. Full skill body loaded on demand via load_skill tool.
- *
- *     skills/
- *       agent-builder/SKILL.md   <-- frontmatter: name, description, triggers
- *       code-review/SKILL.md
- *       mcp-builder/SKILL.md
- *       pdf/SKILL.md
- *
- *     Layer 1: skill metadata in system prompt (always present)
- *     Layer 2: full skill body returned by load_skill (on demand)
- *
- * Key insight: "Don't stuff large instructions into the initial prompt."
+ * s05-skill-loading.ts - Skills
  *
  * Ref: .reference/agents/s05_skill_loading.py
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import type { ToolInput } from "../src/types/agent.js";
+import { runBash, runRead, runWrite, runEdit } from "../src/tools/base-tools.js";
+import { SkillLoader } from "../src/managers/skills.js";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { parse as parseYaml } from "yaml";
+import * as path from "node:path";
 import "dotenv/config";
 
-const WORKDIR = process.cwd();
-const SKILLS_DIR = path.join(WORKDIR, "skills");
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 const MODEL = process.env.MODEL_ID ?? "claude-sonnet-4-6";
+const SKILL_LOADER = new SkillLoader(path.join(process.cwd(), "skills"));
+const SYSTEM = `You are a coding agent at ${process.cwd()}.
+Use load_skill to access specialized knowledge before tackling unfamiliar topics.
 
-// -- Types --
-interface SkillMeta {
-  name: string;
-  description: string;
-  triggers?: string[];
-  filePath: string;
-}
+Skills available:
+${SKILL_LOADER.getDescriptions()}`;
 
-// -- Skill loader --
-function discoverSkills(): SkillMeta[] {
-  // TODO: glob skills/**/SKILL.md，解析 YAML frontmatter（--- ... --- 块）
-  // 返回包含 name, description, triggers, filePath 的数组
-  return [];
-}
-
-function loadSkillBody(name: string, skills: SkillMeta[]): string {
-  // TODO: 根据技能名称找到对应的 SKILL.md，返回完整内容（不含 frontmatter）
-  throw new Error("TODO: implement loadSkillBody");
-}
-
-function buildSystemPrompt(skills: SkillMeta[]): string {
-  // TODO: 将技能元数据注入 system prompt
-  // 格式: "You are a coding agent... Available skills:\n- name: description [triggers: ...]"
-  throw new Error("TODO: implement buildSystemPrompt");
-}
-
-// -- Base tool implementations (same as s02) --
-function safePath(p: string): string {
-  throw new Error("TODO: implement safePath");
-}
-function runBash(command: string): string {
-  throw new Error("TODO: implement runBash");
-}
-function runRead(filePath: string, limit?: number): string {
-  throw new Error("TODO: implement runRead");
-}
-function runWrite(filePath: string, content: string): string {
-  throw new Error("TODO: implement runWrite");
-}
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  throw new Error("TODO: implement runEdit");
-}
-
-const LOAD_SKILL_TOOL: Anthropic.Tool = {
-  name: "load_skill",
-  description: "Load full instructions for a specific skill by name.",
-  input_schema: {
-    type: "object",
-    properties: { name: { type: "string", description: "Skill name to load." } },
-    required: ["name"],
-  },
+const TOOL_HANDLERS: Record<string, (input: ToolInput) => string> = {
+  bash: (i) => runBash(i.command as string),
+  read_file: (i) => runRead(i.path as string, i.limit as number | undefined),
+  write_file: (i) => runWrite(i.path as string, i.content as string),
+  edit_file: (i) => runEdit(i.path as string, i.old_text as string, i.new_text as string),
+  load_skill: (i) => SKILL_LOADER.getContent(i.name as string),
 };
 
-const BASE_TOOLS: Anthropic.Tool[] = [
-  {
-    name: "bash",
-    description: "Run a shell command.",
-    input_schema: {
-      type: "object",
-      properties: { command: { type: "string" } },
-      required: ["command"],
-    },
-  },
-  {
-    name: "read_file",
-    description: "Read file contents.",
-    input_schema: {
-      type: "object",
-      properties: { path: { type: "string" }, limit: { type: "integer" } },
-      required: ["path"],
-    },
-  },
-  {
-    name: "write_file",
-    description: "Write content to file.",
-    input_schema: {
-      type: "object",
-      properties: { path: { type: "string" }, content: { type: "string" } },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "edit_file",
-    description: "Replace exact text in file.",
-    input_schema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        old_text: { type: "string" },
-        new_text: { type: "string" },
-      },
-      required: ["path", "old_text", "new_text"],
-    },
-  },
+const TOOLS: Anthropic.Tool[] = [
+  { name: "bash", description: "Run a shell command.", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+  { name: "read_file", description: "Read file contents.", input_schema: { type: "object", properties: { path: { type: "string" }, limit: { type: "integer" } }, required: ["path"] } },
+  { name: "write_file", description: "Write content to file.", input_schema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
+  { name: "edit_file", description: "Replace exact text in file.", input_schema: { type: "object", properties: { path: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" } }, required: ["path", "old_text", "new_text"] } },
+  { name: "load_skill", description: "Load specialized knowledge by name.", input_schema: { type: "object", properties: { name: { type: "string", description: "Skill name to load" } }, required: ["name"] } },
 ];
 
-// -- Agent loop --
-async function agentLoop(
-  messages: Anthropic.MessageParam[],
-  system: string,
-  skills: SkillMeta[]
-): Promise<void> {
-  // TODO: 与 s02 相同，但工具列表包含 LOAD_SKILL_TOOL
-  // 当调用 load_skill 时，调用 loadSkillBody(name, skills)
-  throw new Error("TODO: implement agentLoop");
+async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
+  while (true) {
+    const response = await client.messages.create({ model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000 });
+    messages.push({ role: "assistant", content: response.content });
+    if (response.stop_reason !== "tool_use") return;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        const handler = TOOL_HANDLERS[block.name];
+        let output: string;
+        try {
+          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;
+        } catch (e) {
+          output = `Error: ${(e as Error).message}`;
+        }
+        console.log(`> ${block.name}:`);
+        console.log(output.slice(0, 200));
+        results.push({ type: "tool_result", tool_use_id: block.id, content: output });
+      }
+    }
+    messages.push({ role: "user", content: results });
+  }
 }
 
-// -- REPL --
 async function main() {
-  const skills = discoverSkills();
-  const system = buildSystemPrompt(skills);
   const rl = readline.createInterface({ input, output });
   const history: Anthropic.MessageParam[] = [];
-
-  console.log(`s05 skill loading. Loaded ${skills.length} skills. Type "q" to quit.`);
-
+  console.log(`s05 skill loading. Loaded ${SKILL_LOADER.size} skills. Type "q" to quit.`);
   while (true) {
     let query: string;
-    try {
-      query = await rl.question("\x1b[36ms05 >> \x1b[0m");
-    } catch {
-      break;
-    }
+    try { query = await rl.question("\x1b[36ms05 >> \x1b[0m"); } catch { break; }
     if (!query.trim() || ["q", "exit"].includes(query.trim().toLowerCase())) break;
     history.push({ role: "user", content: query });
-    await agentLoop(history, system, skills);
+    await agentLoop(history);
     const last = history[history.length - 1];
     if (Array.isArray(last.content)) {
       for (const block of last.content) {
@@ -170,7 +85,6 @@ async function main() {
     }
     console.log();
   }
-
   rl.close();
 }
 

@@ -3,63 +3,24 @@
 /**
  * s04-subagent.ts - Subagent
  *
- * Parent agent gets a "task" tool. Child agent runs with fresh messages=[].
- * Child shares filesystem/tools but returns only a summary string.
- * Child cannot recursively spawn more task agents.
- *
- *     Parent context          Child context (isolated)
- *     +-----------------+     +-----------------+
- *     | messages: [...] |     | messages: []    |
- *     | task tool call  | --> | executes work   |
- *     |                 |     | returns summary |
- *     | tool_result:    | <-- |                 |
- *     |   "summary..."  |     +-----------------+
- *     +-----------------+
- *
- * Key insight: "Isolate noisy work without polluting parent context."
- *
  * Ref: .reference/agents/s04_subagent.py
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import type { ToolInput } from "../src/types/agent.js";
+import { runBash, runRead, runWrite, runEdit } from "../src/tools/base-tools.js";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import "dotenv/config";
 
-const WORKDIR = process.cwd();
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 const MODEL = process.env.MODEL_ID ?? "claude-sonnet-4-6";
-const SYSTEM = `You are a coding agent at ${WORKDIR}. Use the task tool to delegate complex subtasks.`;
+const SYSTEM = `You are a coding agent at ${process.cwd()}. Use the task tool to delegate exploration or subtasks.`;
+const SUBAGENT_SYSTEM = `You are a coding subagent at ${process.cwd()}. Complete the given task, then summarize your findings.`;
 
-// -- Base tool implementations (same as s02) --
-function safePath(p: string): string {
-  throw new Error("TODO: implement safePath");
-}
-function runBash(command: string): string {
-  throw new Error("TODO: implement runBash");
-}
-function runRead(filePath: string, limit?: number): string {
-  throw new Error("TODO: implement runRead");
-}
-function runWrite(filePath: string, content: string): string {
-  throw new Error("TODO: implement runWrite");
-}
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  throw new Error("TODO: implement runEdit");
-}
-
-// -- Subagent runner: executes a task in an isolated context --
-async function runSubagent(prompt: string): Promise<string> {
-  // TODO: 创建空的 messages=[]，运行独立的 agent 循环
-  // 子 agent 不能递归使用 task 工具
-  // 从最终 assistant 消息中提取文本摘要并返回
-  throw new Error("TODO: implement runSubagent");
-}
-
-type ToolInput = Record<string, unknown>;
 const BASE_HANDLERS: Record<string, (input: ToolInput) => string> = {
   bash: (i) => runBash(i.command as string),
   read_file: (i) => runRead(i.path as string, i.limit as number | undefined),
@@ -68,79 +29,100 @@ const BASE_HANDLERS: Record<string, (input: ToolInput) => string> = {
 };
 
 const BASE_TOOLS: Anthropic.Tool[] = [
-  {
-    name: "bash",
-    description: "Run a shell command.",
-    input_schema: {
-      type: "object",
-      properties: { command: { type: "string" } },
-      required: ["command"],
-    },
-  },
-  {
-    name: "read_file",
-    description: "Read file contents.",
-    input_schema: {
-      type: "object",
-      properties: { path: { type: "string" }, limit: { type: "integer" } },
-      required: ["path"],
-    },
-  },
-  {
-    name: "write_file",
-    description: "Write content to file.",
-    input_schema: {
-      type: "object",
-      properties: { path: { type: "string" }, content: { type: "string" } },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "edit_file",
-    description: "Replace exact text in file.",
-    input_schema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        old_text: { type: "string" },
-        new_text: { type: "string" },
-      },
-      required: ["path", "old_text", "new_text"],
-    },
-  },
+  { name: "bash", description: "Run a shell command.", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+  { name: "read_file", description: "Read file contents.", input_schema: { type: "object", properties: { path: { type: "string" }, limit: { type: "integer" } }, required: ["path"] } },
+  { name: "write_file", description: "Write content to file.", input_schema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
+  { name: "edit_file", description: "Replace exact text in file.", input_schema: { type: "object", properties: { path: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" } }, required: ["path", "old_text", "new_text"] } },
 ];
 
 const TASK_TOOL: Anthropic.Tool = {
   name: "task",
-  description: "Delegate a complex subtask to a subagent with isolated context.",
+  description: "Spawn a subagent with fresh context. It shares the filesystem but not conversation history.",
   input_schema: {
     type: "object",
-    properties: { prompt: { type: "string", description: "The subtask description." } },
+    properties: {
+      prompt: { type: "string" },
+      description: { type: "string", description: "Short description of the task" },
+    },
     required: ["prompt"],
   },
 };
 
-// -- Parent agent loop --
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
-  // TODO: 与 s02 相同，但工具列表包含 TASK_TOOL
-  // 当调用 task 工具时，调用 runSubagent(prompt) 获取结果
-  throw new Error("TODO: implement agentLoop");
+async function runSubagent(prompt: string): Promise<string> {
+  const subMessages: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+  let response: Awaited<ReturnType<typeof client.messages.create>> | null = null;
+
+  for (let i = 0; i < 30; i++) {
+    response = await client.messages.create({
+      model: MODEL,
+      system: SUBAGENT_SYSTEM,
+      messages: subMessages,
+      tools: BASE_TOOLS,
+      max_tokens: 8000,
+    });
+
+    subMessages.push({ role: "assistant", content: response.content });
+    if (response.stop_reason !== "tool_use") break;
+
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        const handler = BASE_HANDLERS[block.name];
+        const output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;
+        results.push({ type: "tool_result", tool_use_id: block.id, content: String(output).slice(0, 50_000) });
+      }
+    }
+    subMessages.push({ role: "user", content: results });
+  }
+
+  if (!response) return "(no summary)";
+  return response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("") || "(no summary)";
 }
 
-// -- REPL --
+async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
+  while (true) {
+    const response = await client.messages.create({
+      model: MODEL,
+      system: SYSTEM,
+      messages,
+      tools: [...BASE_TOOLS, TASK_TOOL],
+      max_tokens: 8000,
+    });
+
+    messages.push({ role: "assistant", content: response.content });
+    if (response.stop_reason !== "tool_use") return;
+
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        let output: string;
+        if (block.name === "task") {
+          const description = String((block.input as ToolInput).description ?? "subtask");
+          console.log(`> task (${description}): ${String((block.input as ToolInput).prompt ?? "").slice(0, 80)}`);
+          output = await runSubagent(String((block.input as ToolInput).prompt ?? ""));
+        } else {
+          const handler = BASE_HANDLERS[block.name];
+          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;
+        }
+        console.log(`  ${output.slice(0, 200)}`);
+        results.push({ type: "tool_result", tool_use_id: block.id, content: output });
+      }
+    }
+
+    messages.push({ role: "user", content: results });
+  }
+}
+
 async function main() {
   const rl = readline.createInterface({ input, output });
   const history: Anthropic.MessageParam[] = [];
-
   console.log('s04 subagent. Type "q" or "exit" to quit.');
-
   while (true) {
     let query: string;
-    try {
-      query = await rl.question("\x1b[36ms04 >> \x1b[0m");
-    } catch {
-      break;
-    }
+    try { query = await rl.question("\x1b[36ms04 >> \x1b[0m"); } catch { break; }
     if (!query.trim() || ["q", "exit"].includes(query.trim().toLowerCase())) break;
     history.push({ role: "user", content: query });
     await agentLoop(history);
@@ -152,7 +134,6 @@ async function main() {
     }
     console.log();
   }
-
   rl.close();
 }
 
